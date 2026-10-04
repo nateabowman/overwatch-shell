@@ -39,6 +39,7 @@ Used by parts of the shell (it runs without them, minus that feature):
 | `fastfetch` | the themed terminal readout |
 | `hyprland-plugin-hyprbars` (AUR) | window title bars; without it the buttons sit in the top bar |
 | `hyprpolkitagent` | password prompts for apps |
+| `noctalia` | the emoji list (`/usr/share/noctalia/assets/emoji.json`) and `scripts/apply-system-theme`, which recolours GTK and Qt apps to match |
 
 Fonts: the game's own menu font (GorDIN) is copied from your install in step 3. The shell
 also uses **Share Tech Mono** for numbers and falls back to **Rajdhani** for labels; both are
