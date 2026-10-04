@@ -40,6 +40,7 @@ keep_off() { tl keep_off; }
 ensure_obs() {
     if ! obs GetVersion >/dev/null 2>&1; then
         say "starting OBS in the tray"
+        started_obs=1       # closed again when this run ends: an idle OBS keeps capturing the screen and loads the GPU
         setsid -f obs --minimize-to-tray --disable-shutdown-check >/dev/null 2>&1
         obs wait || die "OBS did not come up"
         sleep 2
@@ -74,9 +75,10 @@ native_on() {
 calm_on() { hyprctl eval "hl.config({ cursor = { inactive_timeout = 1 } })" >/dev/null; tweaked=1; }
 restore_screen() { [ "$tweaked" = 1 ] && { hyprctl reload >/dev/null; tweaked=0; sleep 1; }; return 0; }
 
-pids=(); demo_windows=()
+pids=(); demo_windows=(); started_obs=0
 cleanup() {
     rec_stop
+    [ "$started_obs" = 1 ] && pkill -TERM -x obs
     [ -S "$run/qemu.sock" ] && qm cmd quit >/dev/null 2>&1
     for p in "${pids[@]:-}"; do [ -n "$p" ] && kill "$p" 2>/dev/null; done
     for a in "${demo_windows[@]:-}"; do [ -n "$a" ] && d "hl.dsp.window.close({ window = 'address:$a' })"; done
