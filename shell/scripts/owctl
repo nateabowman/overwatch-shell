@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# Routes Hyprland keybinds to whichever shell is active, and swaps between them.
+#   owctl start        start the active shell (used by Hyprland autostart)
+#   owctl swap         switch between OVERWATCH and Noctalia
+#   owctl stealth [on|off]   plain, silent work look (no argument toggles)
+#   owctl <action>     launcher, session, lock, volume-up, ...
+state="${XDG_STATE_HOME:-$HOME/.local/state}/overwatch/shell"
+mode=$(cat "$state" 2>/dev/null || echo overwatch)
+ow() {
+    local out
+    if out=$(qs -c overwatch ipc call shell "$@" 2>&1) && [[ "$out" != *"Not ready"* && "$out" != *"No running instances"* ]]; then
+        [ -n "$out" ] && echo "$out"; return 0
+    fi
+    # the shell is not answering: restart it and try once more
+    qs -c overwatch kill >/dev/null 2>&1; pkill -x qs 2>/dev/null; sleep 0.4
+    qs -c overwatch -d >/dev/null 2>&1; sleep 1.5
+    qs -c overwatch ipc call shell "$@"
+}
+noct() { noctalia msg "$@"; }
+
+start_overwatch() {
+    qs -c overwatch -d
+    systemctl --user start hyprpolkitagent.service 2>/dev/null
+    pgrep -f 'wl-paste.*cliphist' >/dev/null || {
+        setsid -f wl-paste --type text --watch cliphist store >/dev/null 2>&1
+        setsid -f wl-paste --type image --watch cliphist store >/dev/null 2>&1
+    }
+}
+stop_overwatch() {
+    qs -c overwatch kill 2>/dev/null || pkill -x qs
+    systemctl --user stop hyprpolkitagent.service 2>/dev/null
+    pkill -f 'wl-paste.*cliphist'
+}
+start_noctalia() { setsid -f noctalia >/dev/null 2>&1; }
+stop_noctalia() { pkill -x noctalia; }
+
+marker="$(dirname "$state")/stealth"
+case "$1" in
+    stealth)
+        want="${2:-}"
+        [ -n "$want" ] || { [ -e "$marker" ] && want=off || want=on; }
+        if [ "$want" = on ]; then
+            touch "$marker"
+            ow stealth true >/dev/null 2>&1
+            hyprctl eval 'OW_stealth()' >/dev/null 2>&1
+            hyprctl setcursor Bibata-Modern-Ice 24 >/dev/null 2>&1
+        else
+            rm -f "$marker"
+            ow stealth false >/dev/null 2>&1
+            hyprctl reload config-only >/dev/null 2>&1
+            hyprctl setcursor HL2 32 >/dev/null 2>&1
+        fi
+        "$(dirname "$0")/owkbd" >/dev/null 2>&1
+        exit ;;
+    start)
+        if [ "$mode" = noctalia ]; then start_noctalia; else start_overwatch; fi
+        exit ;;
+    swap)
+        mkdir -p "$(dirname "$state")"
+        if [ "$mode" = noctalia ]; then
+            echo overwatch > "$state"; stop_noctalia; sleep 0.4; start_overwatch
+        else
+            echo noctalia > "$state"; stop_overwatch; sleep 0.4; start_noctalia
+        fi
+        exit ;;
+esac
+
+if [ "$mode" = noctalia ]; then
+    case "$1" in
+        launcher)          noct panel-toggle launcher ;;
+        emoji)             noct panel-toggle launcher /emo ;;
+        switcher)          noct window-switcher ;;
+        settings)          noct settings-toggle ;;
+        control)           noct panel-toggle control-center ;;
+        notifications)     noct panel-toggle control-center notifications ;;
+        clipboard)         noct panel-toggle clipboard ;;
+        wallpaper)         noct panel-toggle wallpaper ;;
+        session)           noct panel-toggle session ;;
+        lock)              noct session lock ;;
+        volume-up)         noct volume-up ;;
+        volume-down)       noct volume-down ;;
+        volume-mute)       noct volume-mute ;;
+        mic-mute)          noct mic-mute ;;
+        brightness-up)     noct brightness-up ;;
+        brightness-down)   noct brightness-down ;;
+        media)             noct media "$2" ;;
+        screenshot-region) noct screenshot-region ;;
+        screenshot-full)   noct screenshot-fullscreen ;;
+    esac
+else
+    case "$1" in
+        launcher)          ow toggle launcher ;;
+        switcher)          ow toggle switcher ;;
+        emoji)             ow toggle emoji ;;
+        control|settings)  ow toggle control ;;
+        notifications)     ow toggle notifications ;;
+        caffeine)          ow caffeine ;;
+        clipboard)         ow toggle clipboard ;;
+        session)           ow toggle session ;;
+        lock)              ow lock ;;
+        lock-test)         ow lockTest ;;
+        volume-up)         ow volumeUp ;;
+        volume-down)       ow volumeDown ;;
+        volume-mute)       ow volumeMute ;;
+        mic-mute)          ow micMute ;;
+        brightness-up)     ow brightnessUp ;;
+        brightness-down)   ow brightnessDown ;;
+        media)             ow media "$2" ;;
+        screenshot-region) ow screenshotRegion ;;
+        screenshot-full)   ow screenshotFull ;;
+        scanlines)         ow scanlines ;;
+        wallpaper)         ow wallpaperNext ;;
+        wallpaper-prev)    ow wallpaperPrev ;;
+        sounds)            ow sounds ;;
+    esac
+fi

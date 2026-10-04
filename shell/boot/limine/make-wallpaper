@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Builds the boot menu wallpaper: the game's own City 17 chapter art, darkened toward the shell's base
+# colour and shaded on the left where the menu text sits, with the emblem bottom right.
+#   make-wallpaper [source image] [output png]
+set -euo pipefail
+here="$(dirname "$(readlink -f "$0")")"
+src="${1:-$HOME/Pictures/Wallpapers/hl2/hl2_chapter12.png}"     # the Citadel, from the game's chapter art
+out="${2:-$here/overwatch-limine.png}"
+logo="$here/../plymouth/overwatch/logo.png"
+[ -f "$logo" ] || logo=/usr/share/plymouth/themes/overwatch/logo.png
+magick "$src" -resize 2560x1600^ -gravity center -extent 2560x1600 \
+    -fill '#0a0f14' -colorize 38% \
+    \( -size 1600x2560 gradient:'#0a0f14ee-#0a0f1400' -rotate -90 \) -gravity west -composite \
+    \( "$logo" -resize 46% \) -gravity southeast -geometry +110+110 -composite \
+    -strip -define png:compression-level=9 "$out"
+echo "$out"

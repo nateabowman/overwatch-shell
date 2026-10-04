@@ -1,0 +1,47 @@
+# OVERWATCH login screen. Installed to /var/lib/noctalia-greeter/greeter.toml by install-system.sh.
+[session]
+default = "Hyprland (uwsm-managed)"
+
+[appearance]
+scheme = "Synced"
+password_style = "default"
+hide_logo = true
+power_buttons_position = "bottom-right"
+scheme_selector_position = "hidden"
+theme_mode = "dark"
+corner_radius_scale = 0.0
+font_family = "GorDIN"
+
+[appearance.palette]
+primary = "#5fd7e8"
+on_primary = "#0a0f14"
+secondary = "#9be8f2"
+on_secondary = "#0a0f14"
+tertiary = "#ffb347"
+on_tertiary = "#0a0f14"
+error = "#ff5a4f"
+on_error = "#0a0f14"
+surface = "#0a0f14"
+on_surface = "#cfeaf0"
+surface_variant = "#131b23"
+on_surface_variant = "#6f8a94"
+outline = "#1f6f7d"
+shadow = "#000000"
+hover = "#5fd7e8"
+on_hover = "#0a0f14"
+
+[appearance.wallpaper]
+path = "/usr/share/overwatch/wallpapers/current.png"
+fill_mode = "crop"
+fill_color = "#0a0f14"
+
+[clock]
+enabled = true
+position = "above-panel"
+time_format = "{:%H:%M:%S}"
+date_format = "%Y.%m.%d %A"
+
+[cursor]
+theme = "HL2"
+size = 32
+path = "/usr/share/icons"

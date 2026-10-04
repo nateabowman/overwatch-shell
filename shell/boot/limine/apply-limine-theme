@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""Put the OVERWATCH look on the Limine boot menu, or take it off again.
+
+    sudo apply-limine-theme             apply
+    sudo apply-limine-theme --revert    put back the appearance lines that were there before
+    apply-limine-theme --dir DIR        work on DIR/limine.conf instead of /boot (for testing)
+
+Only appearance keys in the header (everything above the first menu entry) are touched.
+Boot entries, their hashes, timeout and default_entry are left exactly as they are, so this
+stays safe across kernel updates. The lines it replaces are kept in overwatch-limine.prev
+beside the config, and the whole file as it was is saved once to limine.conf.pre-overwatch-theme.
+"""
+import argparse, os, shutil, sys
+
+here = os.path.dirname(os.path.realpath(__file__))
+BEGIN = "# >>> OVERWATCH theme (apply-limine-theme --revert removes this block)"
+END = "# <<< OVERWATCH theme"
+STALE = "# OVERWATCH appearance"      # comment left by the first installer
+
+
+def key(line):
+    s = line.strip()
+    return s.split(":", 1)[0].strip().lower() if ":" in s and not s.startswith("#") else None
+
+
+def split(lines):
+    """Header ends at the first menu entry (a line starting with /)."""
+    for i, line in enumerate(lines):
+        if line.startswith("/"):
+            return lines[:i], lines[i:]
+    return lines, []
+
+
+def strip_block(header):
+    out, inside = [], False
+    for line in header:
+        if line.strip() == BEGIN:
+            inside = True
+        elif line.strip() == END:
+            inside = False
+        elif not inside:
+            out.append(line)
+    return out
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--revert", action="store_true")
+    ap.add_argument("--dir", default="/boot")
+    a = ap.parse_args()
+    conf, prev = os.path.join(a.dir, "limine.conf"), os.path.join(a.dir, "overwatch-limine.prev")
+    if not os.path.isfile(conf):
+        sys.exit(f"{conf} not found")
+    if not os.access(conf, os.W_OK):
+        sys.exit("Run with sudo.")
+    theme = [l.rstrip("\n") for l in open(os.path.join(here, "theme.conf")) if l.strip()]
+    keys = {key(l) for l in theme}
+    header, rest = split(open(conf).read().split("\n"))
+    themed = BEGIN in [l.strip() for l in header]
+    header = strip_block(header)
+
+    if a.revert:
+        if not themed:
+            sys.exit("The OVERWATCH theme is not applied; nothing to revert.")
+        old = [l.rstrip("\n") for l in open(prev)] if os.path.exists(prev) else []
+        header = old + ([""] if old else []) + header
+        for f in (prev, os.path.join(a.dir, "overwatch-limine.png")):
+            if os.path.exists(f):
+                os.remove(f)
+        done = "reverted"
+    else:
+        wall = os.path.join(here, "overwatch-limine.png")
+        if not os.path.isfile(wall):
+            sys.exit(f"{wall} is missing: run make-wallpaper first")
+        if not themed:      # first time: remember what is being replaced
+            backup = conf + ".pre-overwatch-theme"
+            if not os.path.exists(backup):
+                shutil.copy2(conf, backup)
+            with open(prev, "w") as f:
+                f.write("\n".join(l for l in header if key(l) in keys) + "\n")
+        header = [l for l in header if key(l) not in keys and not l.startswith(STALE)]
+        while header and not header[0].strip():
+            header.pop(0)
+        header = [BEGIN, *theme, END, ""] + header
+        shutil.copy2(wall, os.path.join(a.dir, "overwatch-limine.png"))
+        done = "applied"
+
+    tmp = conf + ".new"
+    with open(tmp, "w") as f:
+        f.write("\n".join(header + rest))
+    shutil.copymode(conf, tmp)
+    os.replace(tmp, conf)
+    print(f"OVERWATCH boot menu theme {done}: {conf}")
+
+
+if __name__ == "__main__":
+    main()

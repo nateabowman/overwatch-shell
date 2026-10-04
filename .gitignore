@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+# built on your machine from your own game files, never committed
+shell/assets/claw.svg
+shell/boot/plymouth/overwatch/bg*.png
+shell/boot/plymouth/overwatch/logo.png
+shell/boot/limine/overwatch-limine.png

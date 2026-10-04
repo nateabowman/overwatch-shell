@@ -1,0 +1,429 @@
+#!/usr/bin/env bash
+# Records the OVERWATCH demo reel with OBS, one segment per part of the theme.
+#   owdemo check       what is ready, what is missing, which other windows are open
+#   owdemo boot        boot menu + boot splash (your real boot files, in a QEMU window)
+#   owdemo login       login screen (the real greeter, in a nested window)
+#   owdemo desktop     shell start-up, backdrops, bar, launcher, windows, panels, alerts
+#   owdemo lock        lock screen (trial lock, releases itself after 30s)
+#   owdemo stealth     SUPER+B work mode and back
+#   owdemo all         every segment, in order
+#   owdemo build       cut the segments together into one captioned video (see build.py)
+# Add -y to skip the "other windows are open" question.
+# Recordings land in ~/Videos/overwatch-demo/raw/<segment>.mkv with a .tl timeline
+# beside each (caption and cut points), which build.py reads. Re-run any segment to redo it.
+set -uo pipefail
+here="$(dirname "$(readlink -f "$0")")"
+ow="$here/.."
+out="${OWDEMO_OUT:-$HOME/Videos/overwatch-demo}"
+raw="$out/raw"; vm="$out/vm"
+run="${XDG_RUNTIME_DIR:-/tmp}/owdemo"; mkdir -p "$raw" "$run"
+yes=0; args=()
+for a in "$@"; do [ "$a" = -y ] && yes=1 || args+=("$a"); done
+set -- "${args[@]:-}"
+
+say() { printf '\033[36m== %s\033[0m\n' "$*"; }
+die() { printf '\033[31m%s\033[0m\n' "$*" >&2; exit 1; }
+obs() { python3 "$here/obsctl.py" "$@"; }
+qm() { python3 "$here/qmon.py" "$run/qemu.sock" "$@"; }
+shell() { qs -c overwatch ipc call shell "$@" >/dev/null 2>&1; }
+d() { hyprctl dispatch "$1" >/dev/null; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# ---- recording + timeline -------------------------------------------------------
+seg=""; t0=0; recording=0
+now() { awk -v a="$(date +%s.%N)" -v b="$t0" 'BEGIN { printf "%.2f", a - b }'; }
+tl() { printf '%s\t%s\t%s\n' "$(now)" "$1" "${2:-}" >> "$raw/$seg.tl"; }
+cue() { tl cue "$1"; }          # caption shown until the next cue (an empty cue clears it)
+keep_on() { tl keep_on; }       # build.py keeps only what lies between keep_on and keep_off
+keep_off() { tl keep_off; }
+
+ensure_obs() {
+    if ! obs GetVersion >/dev/null 2>&1; then
+        say "starting OBS in the tray"
+        setsid -f obs --minimize-to-tray --disable-shutdown-check >/dev/null 2>&1
+        obs wait || die "OBS did not come up"
+        sleep 2
+    fi
+    local w
+    w=$(obs GetSceneItemList '{"sceneName":"Scene"}' | jq -r '[.sceneItems[] | select(.sourceName=="Screen")][0].sceneItemTransform.sourceWidth // 0')
+    [ "${w%.*}" -gt 0 ] 2>/dev/null || die "OBS has no live screen capture. Open OBS from the tray, double-click the Screen source and pick your monitor, then run this again."
+}
+rec_start() {
+    seg="$1"; rm -f "$raw/$seg.tl" "$raw/$seg.mkv"
+    obs StartRecord >/dev/null || die "OBS would not start recording"
+    t0=$(date +%s.%N); recording=1
+}
+rec_stop() {
+    [ "$recording" = 1 ] || return 0
+    local f; f=$(obs StopRecord | jq -r .outputPath); recording=0
+    for _ in $(seq 1 40); do [ "$(obs GetRecordStatus | jq -r .outputActive)" = false ] && break; sleep 0.25; done
+    sleep 0.5
+    [ -f "$f" ] && mv -f "$f" "$raw/$seg.mkv" && say "saved $raw/$seg.mkv"
+}
+
+# ---- screen state ---------------------------------------------------------------
+# The boot and login parts are shown pixel-for-pixel, so the display scale drops to 1
+# while they record. A config reload puts everything back.
+tweaked=0
+native_on() {
+    local m; m=$(hyprctl monitors -j | jq -r '.[] | select(.focused) | "\(.name) \(.width)x\(.height)@\(.refreshRate) \(.x)x\(.y)"')
+    read -r mon mode pos <<< "$m"
+    hyprctl eval "hl.monitor({ output = '$mon', mode = '$mode', position = '$pos', scale = '1' })" >/dev/null
+    tweaked=1; sleep 1.2
+}
+calm_on() { hyprctl eval "hl.config({ cursor = { inactive_timeout = 1 } })" >/dev/null; tweaked=1; }
+restore_screen() { [ "$tweaked" = 1 ] && { hyprctl reload >/dev/null; tweaked=0; sleep 1; }; return 0; }
+
+pids=(); demo_windows=()
+cleanup() {
+    rec_stop
+    [ -S "$run/qemu.sock" ] && qm cmd quit >/dev/null 2>&1
+    for p in "${pids[@]:-}"; do [ -n "$p" ] && kill "$p" 2>/dev/null; done
+    for a in "${demo_windows[@]:-}"; do [ -n "$a" ] && d "hl.dsp.window.close({ window = 'address:$a' })"; done
+    rm -f "$run/qemu.sock" "$run/greetd.sock"
+    show_others
+    restore_shell
+    restore_screen
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+addr_of() {     # wait for a window of this class, print its address
+    local a
+    for _ in $(seq 1 60); do
+        a=$(hyprctl clients -j | jq -r --arg c "$1" '[.[] | select(.class==$c)][0].address // empty')
+        [ -n "$a" ] && { echo "$a"; return 0; }
+        sleep 0.15
+    done
+    return 1
+}
+# Windows that were open before a take are kept out of the taskbar and switcher
+# (services/Windows.qml reads this file); the tour itself runs on an empty workspace.
+hide_file="${XDG_RUNTIME_DIR:-/tmp}/overwatch-hidden"; before=""
+# The mask file makes the shell show stand-in network and device names (services/Sys.qml).
+mask_file="${XDG_RUNTIME_DIR:-/tmp}/overwatch-demo-mask"
+hide_others() { before=$(hyprctl clients -j | jq -r '.[].address'); echo "$before" > "$hide_file"; touch "$mask_file"; sleep 0.6; }
+show_others() { rm -f "$hide_file" "$mask_file"; }
+new_addr() {    # like addr_of, but never a window that was already open before the tour
+    local a
+    for _ in $(seq 1 60); do
+        a=$(hyprctl clients -j | jq -r --arg c "$1" '.[] | select(.class==$c) | .address' | grep -vxF -f <(echo "$before") | head -1)
+        [ -n "$a" ] && { echo "$a"; return 0; }
+        sleep 0.15
+    done
+    return 1
+}
+others() { hyprctl clients -j | jq -r '.[] | select(.class | startswith("owdemo") | not) | "   \(.class): \(.title[0:60])"'; }
+confirm_others() {
+    local list; list=$(others)
+    [ -z "$list" ] || [ "$yes" = 1 ] && return 0
+    echo "These windows are open. Their titles show in the taskbar and switcher, so they will be in the video:"
+    echo "$list"
+    read -r -p "Close anything private, then press Enter to record (Ctrl+C to stop). " _
+}
+countdown() { for i in 3 2 1; do printf '\r   recording in %s ' "$i"; sleep 1; done; printf '\r                    \r'; }
+
+# ---- segments -------------------------------------------------------------------
+seg_boot() {
+    [ -f "$vm/esp.img" ] || die "No boot image at $vm/esp.img (see demo/README.md, 'Boot image')."
+    ensure_obs; say "boot menu + splash"; countdown
+    cp /usr/share/edk2/x64/OVMF_VARS.4m.fd "$run/vars.fd"; rm -f "$run/qemu.sock"
+    native_on; calm_on
+    rec_start 01-boot
+    qemu-system-x86_64 -enable-kvm -machine q35 -cpu host -smp 4 -m 4G -name owdemo-boot \
+        -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF_CODE.4m.fd \
+        -drive if=pflash,format=raw,file="$run/vars.fd" \
+        -drive format=raw,file="$vm/esp.img",snapshot=on \
+        -device VGA,xres=2560,yres=1600,edid=on,vgamem_mb=64 -vga none -nic none \
+        -display sdl -full-screen -monitor "unix:$run/qemu.sock,server,nowait" >"$run/qemu.log" 2>&1 &
+    pids+=($!)
+    until [ -S "$run/qemu.sock" ]; do sleep 0.1; done
+    # any key stops the 2-second countdown; x does nothing else in the menu
+    ( for _ in $(seq 1 16); do qm key x; sleep 0.3; done ) &
+    qm wait above 0.04 25 || die "the boot menu never appeared"
+    sleep 0.4; keep_on; cue "BOOT MENU"
+    wait $!; sleep 1.5
+    qm key down; sleep 0.8; qm key down; sleep 0.9
+    qm key ret; sleep 2.2; qm key ret; sleep 0.9        # open and close the snapshot list
+    qm key up; sleep 0.7; qm key up; sleep 1.2
+    qm key ret; sleep 0.7; keep_off
+    qm wait below 0.02 30; qm wait above 0.05 60 || die "the boot splash never appeared"
+    sleep 0.3; keep_on; cue "BOOT SPLASH"
+    sleep 9; keep_off
+    rec_stop
+    qm cmd quit >/dev/null 2>&1; rm -f "$run/qemu.sock"
+    restore_screen
+}
+
+seg_login() {
+    ensure_obs; say "login screen"; countdown
+    local state="$run/greeter"; mkdir -p "$state"; cp "$ow/boot/greeter.toml" "$state/"
+    # the real greeter picks 1.96x for this panel (see the boot journal); a window has no
+    # physical size to go by, so say it outright
+    printf '\n[output]\nscale = %s\n' "${OWDEMO_GREETER_SCALE:-1.96}" >> "$state/greeter.toml"
+    python3 "$here/fake-greetd.py" "$run/greetd.sock" & pids+=($!)
+    until [ -S "$run/greetd.sock" ]; do sleep 0.1; done
+    native_on; calm_on
+    rec_start 02-login
+    GREETD_SOCK="$run/greetd.sock" NOCTALIA_GREETER_STATE_DIR="$state" GREETER_BIN=/usr/bin/noctalia-greeter WLR_LOG=error \
+        noctalia-greeter-compositor -- --user "${OWDEMO_LOGIN_NAME:-CP-UNIT-17}" >"$run/greeter.log" 2>&1 &   # stand-in name on screen
+    local comp=$!; pids+=("$comp")
+    local a; a=$(addr_of wlroots) || die "the login screen window never appeared"
+    d "hl.dsp.window.fullscreen({ window = 'address:$a' })"
+    sleep 1.5; keep_on; cue "LOGIN SCREEN"
+    sleep 4
+    # wtype's private keymap means nothing to a nested compositor; Hyprland sends real keycodes
+    for c in c i t i z e n 1 7; do d "hl.dsp.send_shortcut({ mods = '', key = '$c' })"; sleep 0.18; done
+    sleep 0.9; keep_off       # the greeter closes the instant it is told the login worked
+    d "hl.dsp.send_shortcut({ mods = '', key = 'Return' })"; sleep 1
+    kill "$comp" 2>/dev/null
+    rec_stop
+    restore_screen
+}
+
+win=""
+term() {    # term <class> <command>: a terminal the demo owns; its address lands in $win
+    kitty --class "$1" -o confirm_os_window_close=0 -e sh -c "$2" >/dev/null 2>&1 &
+    win=$(addr_of "$1") || { win=""; return 1; }
+    demo_windows+=("$win")
+}
+readout() {    # the user's fastfetch look, with the user name and machine shown as stand-ins
+    python3 - "$HOME/.config/fastfetch/config.jsonc" "$run/fastfetch.jsonc" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1]))
+swap = {"title": "CP-UNIT-17", "host": "CITY-17"}
+c["modules"] = [{"type": "custom", "key": m.get("key", ""), "format": swap[m["type"]]} if isinstance(m, dict) and m.get("type") in swap else m
+                for m in c.get("modules", [])]
+json.dump(c, open(sys.argv[2], "w"))
+PY
+    echo "fastfetch -c '$run/fastfetch.jsonc'; exec sleep 900"
+}
+monitor() {    # btop in the user's own look, minus the process list (its user column shows the login name)
+    mkdir -p "$run/cfg/btop"
+    cp -r "$HOME/.config/btop/themes" "$run/cfg/btop/" 2>/dev/null
+    sed 's/^shown_boxes = .*/shown_boxes = "cpu mem net"/' "$HOME/.config/btop/btop.conf" > "$run/cfg/btop/btop.conf" 2>/dev/null
+    echo "XDG_CONFIG_HOME='$run/cfg' btop"
+}
+stage_ws=""; stage_home=""
+stage_on() {   # an empty workspace with two demo windows, so nothing of the user's is in frame
+    stage_home=$(hyprctl activeworkspace -j | jq -r .id)
+    stage_ws=9; [ "$stage_home" = 9 ] && stage_ws=8
+    d "hl.dsp.focus({ workspace = $stage_ws })"; sleep 0.6
+    local a b
+    term owdemo-info "$(readout)"; a=$win
+    term owdemo-btop "$(monitor)"; b=$win
+    owwin snap left "$a"; owwin snap right "$b"; sleep 1.2
+}
+stage_off() {
+    for w in "${demo_windows[@]:-}"; do [ -n "$w" ] && d "hl.dsp.window.close({ window = 'address:$w' })"; done
+    demo_windows=()
+    [ -n "$stage_home" ] && d "hl.dsp.focus({ workspace = $stage_home })"
+}
+key() { for k in "$@"; do wtype -k "$k"; sleep 0.45; done; }             # named keys, one at a time
+typed() { local i; for ((i = 0; i < ${#1}; i++)); do wtype -- "${1:i:1}"; sleep 0.14; done; }
+owwin() { "$ow/scripts/owwin" "$@"; }
+
+# Shell settings the tour changes; saved before recording, put back whatever happens.
+saved=""; saved_vol=""; saved_profile=""
+get() { echo "$1" | jq -r ".$2"; }
+save_shell() {
+    saved=$(qs -c overwatch ipc call shell state 2>/dev/null)
+    saved_vol=$(wpctl get-volume @DEFAULT_AUDIO_SINK@ | awk '{print $2}')
+    saved_profile=$(powerprofilesctl get 2>/dev/null)
+}
+restore_shell() {
+    [ -n "$saved" ] || return 0
+    local cur i; cur=$(qs -c overwatch ipc call shell state 2>/dev/null) || return 0
+    shell radio stop; shell idlePreview false; shell close
+    shell dnd "$(get "$saved" dnd)"
+    shell backdrop "$(get "$saved" wallpaper)" "$(get "$saved" backdropMode)"
+    [ "$(get "$cur" scanlines)" = "$(get "$saved" scanlines)" ] || shell scanlines
+    [ "$(get "$cur" caffeine)" = "$(get "$saved" caffeine)" ] || shell caffeine
+    for i in 1 2; do
+        [ "$(get "$(qs -c overwatch ipc call shell state)" soundLevel)" = "$(get "$saved" soundLevel)" ] && break
+        shell sounds
+    done
+    [ "$(get "$cur" stealth)" = true ] && [ "$(get "$saved" stealth)" = false ] && "$ow/scripts/owctl" stealth off
+    [ -n "$saved_vol" ] && wpctl set-volume @DEFAULT_AUDIO_SINK@ "$saved_vol"
+    [ -n "$saved_profile" ] && powerprofilesctl set "$saved_profile" 2>/dev/null
+    saved=""
+}
+
+seg_desktop() {
+    ensure_obs; have wtype || die "wtype is needed for the desktop tour (pacman -S wtype)"
+    say "desktop tour (about two and a half minutes, hands off)"; countdown
+    local home_ws; home_ws=$(hyprctl activeworkspace -j | jq -r .id)
+    local ws=9; [ "$home_ws" = 9 ] && ws=8
+    d "hl.dsp.focus({ workspace = $ws })"; sleep 0.6
+    calm_on; save_shell; hide_others
+    shell clearNotifications
+
+    rec_start 03-desktop
+    sleep 0.5; keep_on
+    # Shell start-up, with the login sound and voice line it plays once per session
+    cue "SHELL START-UP"
+    rm -f "${XDG_RUNTIME_DIR}/overwatch-greeted"
+    qs -c overwatch kill >/dev/null 2>&1; sleep 0.6; qs -c overwatch -d >/dev/null 2>&1
+    sleep 6
+
+    cue "CITY 17 BACKDROPS  //  GAME CHAPTER ART"
+    for _ in 1 2 3 4 5 6; do shell wallpaperNext; sleep 1.7; done
+
+    cue "STATUS BAR  //  LIVE TELEMETRY"
+    for c in cpu mem gpu; do shell detail "$c"; sleep 2.4; done
+    shell detail ""; sleep 0.6
+
+    cue "LAUNCHER  //  CIVIL PROTECTION TERMINAL"
+    shell toggle launcher; sleep 1.8
+    key Down Down Down Up; sleep 0.4
+    typed "term"; sleep 1.2
+    key BackSpace BackSpace BackSpace BackSpace
+    typed "file"; sleep 1.4
+    shell close; sleep 0.8
+
+    cue "WINDOWS  //  TITLE BARS, FOCUS BRACKETS, TASKBAR"
+    local a b c=""
+    term owdemo-info "$(readout)"; a=$win
+    owwin snap center "$a"; sleep 2
+    term owdemo-btop "$(monitor)"; b=$win
+    owwin snap center "$b"; sleep 1.8
+    rm -rf "$run/CITY 17 BACKDROPS"; mkdir -p "$run/CITY 17 BACKDROPS"      # the backdrops in rotation, as a folder to browse
+    while IFS= read -r f; do [ -f "$f" ] && ln -sf "$f" "$run/CITY 17 BACKDROPS/"; done < "$HOME/.local/share/overwatch/wallpapers.txt"
+    dolphin --new-window "$run/CITY 17 BACKDROPS" >/dev/null 2>&1 &
+    c=$(new_addr org.kde.dolphin) && demo_windows+=("$c")
+    [ -n "$c" ] && owwin snap center "$c"
+    sleep 2.2
+
+    cue "SNAP TO HALVES AND QUARTERS"
+    owwin snap left "$a"; sleep 0.9
+    owwin snap right "$b"; sleep 1.3
+    owwin snap tl "$a"; sleep 0.8
+    [ -n "$c" ] && { owwin snap bl "$c"; sleep 1.5; }
+    cue "MINIMIZE  //  RESTORE  //  MAXIMIZE"
+    owwin minimize "$b"; sleep 1.4; owwin restore "$b"; sleep 1.4
+    owwin maximize "$b"; sleep 2; owwin maximize "$b"; sleep 1.2
+
+    cue "WINDOW SWITCHER  //  LIVE SURVEILLANCE FEEDS"
+    shell toggle switcher; sleep 1.6
+    key Tab Tab Tab; sleep 0.8
+    key Return; sleep 1.2
+
+    cue "WORKSPACES  //  SECTORS"
+    d "hl.dsp.focus({ workspace = $((ws - 1)) })"; sleep 1.5
+    d "hl.dsp.focus({ workspace = $ws })"; sleep 1.5
+
+    cue "CONTROL INTERFACE  //  QUICK SETTINGS"
+    shell toggle control; sleep 3
+    if [ -n "$saved_profile" ]; then
+        powerprofilesctl set performance 2>/dev/null; sleep 1.6
+        powerprofilesctl set "$saved_profile" 2>/dev/null; sleep 1.2
+    fi
+    shell scanlines; sleep 1.4; shell scanlines; sleep 1
+    cue "CITY 17 BROADCAST  //  SOUNDTRACK RADIO"
+    shell radio toggle; sleep 5
+    shell radio next; sleep 4
+    shell radio stop; sleep 1
+    shell close; sleep 0.7
+
+    cue "NOTIFICATIONS"
+    notify-send -a "Overwatch" "Dispatch" "Sector sweep complete. No anomalies."; sleep 2.6
+    notify-send -a "Overwatch" "Ration distribution" "Your allocation is available at the terminal."; sleep 2.6
+    cue "PRIORITY ALERT  //  SOUND + KEYBOARD FLASH"
+    notify-send -a "Overwatch" -u critical "Priority alert" "Anticitizen reported in this community. Code: lock, cauterize, stabilize."; sleep 4
+    cue "DISPATCH HELD  //  DO NOT DISTURB"
+    shell dnd true; notify-send -a "Overwatch" "Held" "This one arrives silently while dispatch is held."; sleep 1.5
+    shell toggle notifications; sleep 3.5; shell close; sleep 0.6
+    shell dnd false; shell clearNotifications
+
+    cue "ON-SCREEN READOUTS"
+    shell volumeUp; sleep 0.6; shell volumeUp; sleep 0.8; shell volumeDown; sleep 0.6; shell volumeDown; sleep 0.9
+    shell volumeMute; sleep 1.1; shell volumeMute; sleep 0.9
+    shell brightnessDown; sleep 0.8; shell brightnessUp; sleep 1.1
+    shell micMute; sleep 1.2; shell micMute; sleep 1
+    shell caffeine; sleep 1.3; shell caffeine; sleep 1
+    shell sounds; sleep 1.2; shell sounds; sleep 1.2; shell sounds; sleep 1.2
+
+    cue "GLYPH INDEX  //  EMOJI PICKER"
+    shell toggle emoji; sleep 1.4
+    typed "fire"; sleep 1.4
+    shell close; sleep 0.7
+
+    cue "SCREENSHOT SCANNER"
+    shell flash; sleep 1.8
+
+    cue "SESSION DIRECTIVES"
+    shell toggle session; sleep 1.8
+    key Down Down Down Down; sleep 0.9       # navigation only: nothing is chosen
+    key Up Up; sleep 0.8
+    shell close; sleep 1
+    cue ""; sleep 0.5
+    keep_off
+    rec_stop
+    for w in "${demo_windows[@]:-}"; do [ -n "$w" ] && d "hl.dsp.window.close({ window = 'address:$w' })"; done
+    demo_windows=()
+    show_others; restore_shell
+    d "hl.dsp.focus({ workspace = $home_ws })"
+    restore_screen
+}
+
+seg_lock() {
+    ensure_obs; say "idle broadcast + lock screen (trial lock: releases itself after 30 seconds)"; countdown
+    calm_on; save_shell; hide_others; stage_on
+    rec_start 04-lock
+    sleep 0.8; keep_on; cue "IDLE BROADCAST  //  ONE MINUTE BEFORE THE LOCK"
+    shell idlePreview true; sleep 4.5
+    shell idlePreview false; sleep 0.4
+    cue "LOCK SCREEN"
+    shell lockTest
+    sleep 6
+    cue "WRONG CREDENTIAL"
+    typed "freeman"; sleep 0.5
+    shell lockDenyPreview; sleep 3.2       # the rejection, shown without asking PAM
+    keep_off
+    sleep 17.6; keep_on; cue "RELEASE"     # trial lock lets go 30s after it engaged
+    sleep 4.5; cue ""; keep_off
+    rec_stop
+    stage_off; show_others; restore_shell; restore_screen
+}
+
+seg_stealth() {
+    ensure_obs; have wtype || die "wtype is needed (pacman -S wtype)"
+    say "stealth mode"; countdown
+    calm_on; save_shell; hide_others; stage_on
+    rec_start 05-stealth
+    sleep 0.8; keep_on; cue "SUPER+B  //  STEALTH MODE FOR WORK"
+    sleep 1.5
+    "$ow/scripts/owctl" stealth on; sleep 4
+    shell toggle launcher; sleep 2.5; shell close; sleep 0.6
+    shell toggle control; sleep 3; shell close; sleep 0.8
+    cue "AND BACK"
+    "$ow/scripts/owctl" stealth off; sleep 4.5
+    cue ""; keep_off
+    rec_stop
+    tweaked=0       # stealth off already reloaded the config
+    stage_off; show_others; restore_shell
+}
+
+check() {
+    say "tools"
+    for t in obs qemu-system-x86_64 noctalia-greeter-compositor ffmpeg jq kitty dolphin fastfetch btop notify-send; do
+        have "$t" && echo "   ok       $t" || echo "   MISSING  $t"
+    done
+    have wtype && echo "   ok       wtype" || echo "   optional wtype (types in the launcher and the login screen; without it those are shown but not typed into)"
+    say "boot image"; [ -f "$vm/esp.img" ] && echo "   ok       $vm/esp.img" || echo "   MISSING  $vm/esp.img"
+    say "OBS"; if obs GetVersion >/dev/null 2>&1; then echo "   running, recording to $(obs GetRecordDirectory | jq -r .recordDirectory)"; else echo "   not running (owdemo starts it)"; fi
+    say "segments recorded"; ls -1 "$raw"/*.mkv 2>/dev/null | sed 's/^/   /' || echo "   none yet"
+    say "other open windows (visible in the taskbar while recording)"; others
+}
+
+case "${1:-}" in
+    check)   check ;;
+    boot)    seg_boot ;;
+    login)   seg_login ;;
+    desktop) seg_desktop ;;
+    lock)    seg_lock ;;
+    stealth) seg_stealth ;;
+    all)     seg_boot; seg_login; seg_desktop; seg_lock; seg_stealth ;;
+    build)   shift; exec python3 "$here/build.py" "$out" "$@" ;;
+    *)       sed -n '2,13p' "$0"; exit 1 ;;
+esac

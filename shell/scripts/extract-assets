@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Pulls fonts, sounds, interface art, wallpapers, cursors and the soundtrack out of
+# YOUR Steam installs (Half-Life 2, its episodes, Entropy Zero 2) for use by this
+# shell on this machine. Nothing from the games is stored inside the shell directory.
+set -euo pipefail
+here="$(dirname "$(readlink -f "$0")")"
+data="${XDG_DATA_HOME:-$HOME/.local/share}/overwatch"
+game="$HOME/.local/share/Steam/steamapps/common/Half-Life 2"
+ez2="$HOME/.local/share/Steam/steamapps/common/EntropyZero2/entropyzero2/resource"
+[ -d "$game/hl2" ] || { echo "Half-Life 2 is not installed."; exit 1; }
+mkdir -p "$data/fonts"
+[ -x "$data/venv/bin/python" ] || python3 -m virtualenv -q "$data/venv"
+"$data/venv/bin/python" -c 'import vpk, srctools, PIL' 2>/dev/null || "$data/venv/bin/pip" -q install vpk srctools pillow
+
+cp -f "$game/hl2/resource/halflife2.ttf" "$game/hl2/resource/hl2crosshairs.ttf" "$data/fonts/"
+cp -f "$game"/hl2_complete/resource/gordin-*.ttf "$data/fonts/" 2>/dev/null || true
+cp -f "$ez2/UniversalUnion.ttf" "$ez2/ez2_hud.ttf" "$data/fonts/" 2>/dev/null || true
+mkdir -p "$HOME/.local/share/fonts"; ln -sfn "$data/fonts" "$HOME/.local/share/fonts/overwatch-game"
+fc-cache -f "$HOME/.local/share/fonts" 2>/dev/null || true
+
+echo "Converting textures..."; "$data/venv/bin/python" "$here/convert-textures.py" > "$data/textures.log" 2>&1 || { tail -5 "$data/textures.log"; exit 1; }
+echo "Staging assets...";      "$data/venv/bin/python" "$here/build-assets.py" "$@"
+echo "Drawing the emblem..."; "$data/venv/bin/python" "$here/make-emblem.py"
+echo "Assets are in $data"

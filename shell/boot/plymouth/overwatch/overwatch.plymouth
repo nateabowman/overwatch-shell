@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=OVERWATCH
+Description=Combine terminal boot splash
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/overwatch
+ScriptFile=/usr/share/plymouth/themes/overwatch/overwatch.script

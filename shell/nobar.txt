@@ -1,0 +1,1 @@
+^(steam|steam_app.*|gamescope|brave-browser.*|firefox|zen.*|chromium.*|google-chrome.*|org\.gnome\..*|gnome-.*|.*swash|nwg-look|[Cc]laude.*|[Cc]odex.*|com\.mitchellh\.ghostty|blender|hyprpolkitagent|xdg-desktop-portal.*|vesktop|discord|.*\.exe)$

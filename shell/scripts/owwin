@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# Window actions for the stacking setup. Hyprland has no real "minimize", so
+# minimized windows are parked on the hidden workspace special:minimized.
+#   owwin minimize [addr]     owwin restore [addr]      owwin toggle <addr>
+#   owwin maximize [addr]     owwin close [addr]        owwin float-all
+#   owwin snap <left|right|tl|tr|bl|br|center> [addr]
+set -euo pipefail
+cmd="${1:-}"; addr="${2:-}"
+[ "$cmd" = snap ] && { where="${2:-left}"; addr="${3:-}"; }
+d() { hyprctl dispatch "$1" >/dev/null; }
+active() { hyprctl activewindow -j | jq -r '.address // empty'; }
+[ -n "$addr" ] || addr=$(active)
+[[ "$addr" == 0x* || -z "$addr" ]] || addr="0x$addr"
+w="window = 'address:$addr'"
+sfx() { qs -c overwatch ipc call shell sfx "$1" >/dev/null 2>&1 & }
+# Height of the title bar the hyprbars plugin draws on this window (0 if none)
+bar_of() {
+    local h cls
+    h=$(cat "${XDG_STATE_HOME:-$HOME/.local/state}/overwatch/titlebars" 2>/dev/null) || { echo 0; return; }
+    cls=$(hyprctl clients -j | jq -r --arg a "$1" '.[] | select(.address==$a) | .class')
+    if echo "$cls" | grep -qEf "$(dirname "$(readlink -f "$0")")/../nobar.txt"; then echo 0; else echo "${h:-0}"; fi
+}
+ws_of() { hyprctl clients -j | jq -r --arg a "$1" '.[] | select(.address==$a) | .workspace.name'; }
+
+# Moving a window to the hidden workspace shifts its position, so remember where it was.
+store="${XDG_RUNTIME_DIR:-/tmp}/overwatch-minimized"; mkdir -p "$store"
+minimize() {
+    [ -n "$addr" ] || return 0
+    hyprctl clients -j | jq -r --arg a "$addr" '.[] | select(.address==$a and .workspace.name!="special:minimized") | "\(.at[0]) \(.at[1])"' > "$store/$addr"
+    d "hl.dsp.window.move({ workspace = 'special:minimized', follow = false, $w })"
+}
+restore() {
+    local cur x y; cur=$(hyprctl activeworkspace -j | jq -r '.name')
+    d "hl.dsp.window.move({ workspace = '$cur', follow = false, $w })"
+    if read -r x y < "$store/$addr" 2>/dev/null && [ -n "$y" ]; then d "hl.dsp.window.move({ x = $x, y = $y, $w })"; fi
+    rm -f "$store/$addr"
+    d "hl.dsp.focus({ $w })"; d "hl.dsp.window.bring_to_top({ $w })"
+}
+
+case "$cmd" in
+    minimize)
+        sfx minimize; minimize ;;
+    restore)
+        # no address given: bring back the most recently minimized window
+        if [ -z "${2:-}" ]; then
+            addr=$(hyprctl clients -j | jq -r '[.[] | select(.workspace.name=="special:minimized")] | sort_by(.focusHistoryID) | .[0].address // empty')
+            [ -n "$addr" ] || exit 0; w="window = 'address:$addr'"
+        fi
+        restore ;;
+    toggle)
+        [ -n "${2:-}" ] || exit 1
+        if [ "$(ws_of "$addr")" = "special:minimized" ]; then restore
+        elif [ "$(active)" = "$addr" ]; then sfx minimize; minimize
+        else d "hl.dsp.focus({ $w })"; d "hl.dsp.window.bring_to_top({ $w })"; fi ;;
+    focus)
+        [ -n "${2:-}" ] || exit 1
+        if [ "$(ws_of "$addr")" = "special:minimized" ]; then restore
+        else d "hl.dsp.focus({ $w })"; d "hl.dsp.window.bring_to_top({ $w })"; fi ;;
+    maximize)
+        [ -n "$addr" ] && { sfx maximize; d "hl.dsp.window.fullscreen({ mode = 1, $w })"; } ;;
+    close)
+        [ -n "$addr" ] && d "hl.dsp.window.close({ $w })" ;;
+    float-all)
+        hyprctl clients -j | jq -r '.[] | select(.floating==false) | "\(.address) \(.at[0]) \(.at[1]) \(.size[0]) \(.size[1])"' |
+        while read -r a x y sw sh; do
+            d "hl.dsp.window.float({ action = 'enable', window = 'address:$a' })"
+            d "hl.dsp.window.resize({ x = $sw, y = $sh, window = 'address:$a' })"
+            d "hl.dsp.window.move({ x = $x, y = $y, window = 'address:$a' })"
+        done ;;
+    snap)
+        [ -n "$addr" ] || exit 0
+        read -r mx my mw mh rl rt rr rb < <(hyprctl monitors -j | jq -r '.[] | select(.focused) | "\(.x) \(.y) \((.width/.scale)|floor) \((.height/.scale)|floor) \(.reserved[0]) \(.reserved[1]) \(.reserved[2]) \(.reserved[3])"')
+        g=6; ax=$((mx+rl+g)); ay=$((my+rt+g)); aw=$((mw-rl-rr-2*g)); ah=$((mh-rt-rb-2*g)); hw=$(((aw-g)/2)); hh=$(((ah-g)/2))
+        bar=$(bar_of "$addr")
+        case "$where" in
+            left)   x=$ax;          y=$ay;          sw=$hw; sh=$ah ;;
+            right)  x=$((ax+hw+g)); y=$ay;          sw=$hw; sh=$ah ;;
+            tl)     x=$ax;          y=$ay;          sw=$hw; sh=$hh ;;
+            tr)     x=$((ax+hw+g)); y=$ay;          sw=$hw; sh=$hh ;;
+            bl)     x=$ax;          y=$((ay+hh+g)); sw=$hw; sh=$hh ;;
+            br)     x=$((ax+hw+g)); y=$((ay+hh+g)); sw=$hw; sh=$hh ;;
+            center) sw=$((aw*62/100)); sh=$((ah*72/100)); x=$((ax+(aw-sw)/2)); y=$((ay+(ah-sh)/2)) ;;
+            *) exit 1 ;;
+        esac
+        y=$((y+bar)); sh=$((sh-bar))      # leave room for the window's title bar
+        [ "$(hyprctl clients -j | jq -r --arg a "$addr" '.[] | select(.address==$a) | .fullscreen')" != 0 ] && d "hl.dsp.window.fullscreen({ mode = 1, $w })"
+        d "hl.dsp.window.float({ action = 'enable', $w })"
+        d "hl.dsp.window.resize({ x = $sw, y = $sh, $w })"
+        d "hl.dsp.window.move({ x = $x, y = $y, $w })"
+        d "hl.dsp.window.bring_to_top({ $w })" ;;
+    *) sed -n '2,7p' "$0"; exit 1 ;;
+esac

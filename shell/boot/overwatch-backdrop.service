@@ -1,0 +1,11 @@
+[Unit]
+Description=OVERWATCH: pick a random login backdrop
+Before=greetd.service
+ConditionPathIsDirectory=/usr/share/overwatch/wallpapers
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'f=$(find /usr/share/overwatch/wallpapers -maxdepth 1 -name "*.png" ! -name current.png | shuf -n 1); [ -n "$f" ] && ln -sfn "$f" /usr/share/overwatch/wallpapers/current.png'
+
+[Install]
+WantedBy=multi-user.target

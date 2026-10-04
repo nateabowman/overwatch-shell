@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Re-applies the OVERWATCH palette to GTK, Qt and KDE apps. Renders only those
+# four Noctalia templates; "--builtin-config" must not be used here because it
+# renders every template Noctalia ships and edits terminal and compositor configs.
+set -euo pipefail
+here="$(dirname "$(readlink -f "$0")")"
+t=/usr/share/noctalia/assets/templates
+c="${XDG_CONFIG_HOME:-$HOME/.config}"
+d="${XDG_DATA_HOME:-$HOME/.local/share}"
+exec noctalia theme --theme-json "$here/../assets/system-palette.json" --default-mode dark \
+    -r "$t/gtk/gtk3.css:$c/gtk-3.0/noctalia.css" \
+    -r "$t/gtk/gtk4.css:$c/gtk-4.0/noctalia.css" \
+    -r "$t/qt/qtct.conf:$c/qt6ct/colors/noctalia.conf" \
+    -r "$t/qt/qtct.conf:$c/qt5ct/colors/noctalia.conf" \
+    -r "$t/kde/kcolorscheme.colors:$d/color-schemes/noctalia.colors"

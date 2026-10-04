@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+# Keyboard backlight (AERO X16 single-zone RGB, driven over HID LampArray).
+#   owkbd            re-apply the saved colour (used by Hyprland autostart and owctl stealth)
+#   owkbd rrggbb     set and remember a colour
+#   owkbd off        lights out (remembered too)
+# Combine and stealth each remember their own colour; whichever mode is active is the one set.
+# Needs /etc/udev/rules.d/70-gigabyte-kbd-lamparray.rules for device access.
+import fcntl, os, struct, sys, time
+
+DEV = "/dev/input/by-id/usb-GIGABYTE_USB-HID_Keyboard_AP0000000003-if04-hidraw"
+STATE_DIR = os.path.join(os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")), "overwatch")
+if os.path.exists(os.path.join(STATE_DIR, "stealth")):
+    STATE, DEFAULT = os.path.join(STATE_DIR, "kbd-stealth"), "ffd9a0"  # soft warm white
+else:
+    STATE, DEFAULT = os.path.join(STATE_DIR, "kbd"), "5fd7e8"  # OW_TEAL
+
+arg = sys.argv[1].lstrip("#").lower() if len(sys.argv) > 1 else None
+if arg is None:
+    try:
+        arg = open(STATE).read().strip()
+    except OSError:
+        arg = DEFAULT
+try:
+    r, g, b = bytes(3) if arg == "off" else bytes.fromhex(arg)
+except ValueError:
+    sys.exit("usage: owkbd [rrggbb|off]")
+
+def feature(fd, data):  # HIDIOCSFEATURE
+    fcntl.ioctl(fd, (3 << 30) | (len(data) << 16) | (ord("H") << 8) | 0x06, bytearray(data))
+
+for attempt in range(30):  # at login the node or its uaccess ACL may not be there yet
+    try:
+        fd = os.open(DEV, os.O_RDWR)
+        break
+    except OSError as e:
+        if attempt == 29:
+            sys.exit(f"owkbd: {e}")
+        time.sleep(0.5)
+feature(fd, bytes([6, 0]))  # LampArrayControl: autonomous mode off, host drives the lamp
+feature(fd, struct.pack("<BBHHBBBB", 5, 1, 0, 0, r, g, b, 1))  # LampRangeUpdate, lamp 0
+os.close(fd)
+
+if len(sys.argv) > 1:
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(STATE, "w") as f:
+        f.write(arg + "\n")
